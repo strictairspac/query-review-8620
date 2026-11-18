@@ -32,3 +32,6 @@ target/
 *.o
 *.obj
 .DS_Store
+
+# 批次验收产物不放入源码
+test-artifacts/

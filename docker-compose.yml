@@ -7,13 +7,36 @@ services:
       POSTGRES_DB: query_review
       POSTGRES_USER: app
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_demo_4101}
+      REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:-local_repl_4101}
     ports: ["${DB_PORT:-17740}:5432"]
-    volumes: ["db-data:/var/lib/postgresql/data"]
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./backend/scripts/db-init-replication.sh:/docker-entrypoint-initdb.d/10-replication.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U app -d query_review"]
       interval: 3s
       timeout: 3s
       retries: 30
+  db-replica:
+    image: postgres:16-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-query-review}-db-replica
+    entrypoint: ["/replica-entrypoint.sh"]
+    user: root
+    environment:
+      PRIMARY_HOST: db
+      REPLICATION_USER: replicator
+      REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:-local_repl_4101}
+      REPLICA_DIR: /var/lib/postgresql/replica
+    volumes:
+      - ./backend/scripts/replica-entrypoint.sh:/replica-entrypoint.sh:ro
+      - replica-data:/var/lib/postgresql/replica
+    depends_on:
+      db: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d query_review && psql -U postgres -d query_review -tAc 'SELECT pg_is_in_recovery()' | grep -q t"]
+      interval: 3s
+      timeout: 3s
+      retries: 60
   redis:
     image: redis:7-alpine
     container_name: ${COMPOSE_PROJECT_NAME:-query-review}-redis
@@ -29,12 +52,17 @@ services:
     environment: &app-env
       DATABASE_URL: postgresql+psycopg2://app:${POSTGRES_PASSWORD:-local_demo_4101}@db/query_review
       REDIS_URL: redis://redis:6379/0
+      REPLICA_DATABASE_URL: postgresql+psycopg2://app:${POSTGRES_PASSWORD:-local_demo_4101}@db-replica/query_review
+      REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:-local_repl_4101}
       JWT_SECRET: ${JWT_SECRET:-local-demo-query-review-change-before-production-20261117}
       SEED_DEMO: ${SEED_DEMO:-true}
+      FALLBACK_WAIT_SECONDS: ${FALLBACK_WAIT_SECONDS:-10}
     ports: ["${BACKEND_PORT:-19240}:8000"]
     volumes: ["artifacts:/artifacts"]
+    # 副本故障不应阻止应用启动：批次会按规则回主库
     depends_on:
       db: {condition: service_healthy}
+      db-replica: {condition: service_started}
       redis: {condition: service_healthy}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -49,6 +77,7 @@ services:
     volumes: ["artifacts:/artifacts"]
     depends_on:
       db: {condition: service_healthy}
+      db-replica: {condition: service_started}
       redis: {condition: service_healthy}
       backend: {condition: service_healthy}
     healthcheck:
@@ -69,5 +98,6 @@ services:
       retries: 20
 volumes:
   db-data:
+  replica-data:
   redis-data:
   artifacts:

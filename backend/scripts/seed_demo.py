@@ -2,16 +2,30 @@ from sqlalchemy import select,text
 from src.config.database import Base,engine,Session
 from src.models.user import User
 from src.models.sample import Sample
-from src.models.batch import Batch
+from src.models.batch import Batch,BatchEvent
 from src.models.evidence import Evidence
 from src.models.audit import Audit
 from src.utils.password import hash_password
+from src.config.settings import REPLICATION_PASSWORD
 ORIGINAL="SELECT DISTINCT i.customer, (SELECT SUM(j.amount) FROM invoices j WHERE j.customer=i.customer AND j.temperature<=8) AS total FROM invoices i WHERE (SELECT SUM(k.amount) FROM invoices k WHERE k.customer=i.customer AND k.temperature<=8)>100 ORDER BY customer"
+SCHEMA_UPGRADE="""
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS source VARCHAR(20);
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS fallback_reason VARCHAR(40);
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS accepted_primary_lsn VARCHAR(40);
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS replica_lsn VARCHAR(40);
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS snapshot VARCHAR(80);
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS replica_wait_ms INTEGER;
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS fallback_wait_ms INTEGER;
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS started_at TIMESTAMP;
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS finished_at TIMESTAMP;
+"""
 def seed():
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
+        conn.execute(text(SCHEMA_UPGRADE))
         conn.execute(text("CREATE TABLE IF NOT EXISTS invoices (invoice_id INTEGER PRIMARY KEY, customer TEXT NOT NULL, route TEXT NOT NULL, amount NUMERIC(12,2) NOT NULL, temperature NUMERIC(4,1) NOT NULL, status TEXT NOT NULL)"))
         conn.execute(text("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='query_reader') THEN CREATE ROLE query_reader NOLOGIN; END IF; END $$"))
+        conn.execute(text("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='replicator') THEN CREATE ROLE replicator LOGIN REPLICATION PASSWORD '%s'; END IF; END $$" % REPLICATION_PASSWORD))
         conn.execute(text('GRANT SELECT ON invoices TO query_reader'))
         conn.execute(text("INSERT INTO invoices SELECT i, (ARRAY['澄港海产','南港鲜食','北湾冷运'])[1+(i%3)], (ARRAY['东线','西线'])[1+(i%2)], 35+(i%17)*7, 2+(i%9), CASE WHEN i%7=0 THEN 'pending' ELSE 'settled' END FROM generate_series(1,600) i ON CONFLICT DO NOTHING"))
     with Session() as db:
